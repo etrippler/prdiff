@@ -12,14 +12,13 @@ cargo build --release
 ./target/release/prdiff --help       # show usage
 ```
 
-Symlinked to `~/.local/bin/prdiff` for global access.
-
 ## Architecture
 
 Multi-file Rust TUI using:
 - `ratatui` - terminal UI framework
 - `crossterm` - terminal input/events
 - `syntect` - syntax highlighting
+- `anyhow` - error handling
 
 ## Key Components
 
@@ -54,8 +53,8 @@ Git operations run in a separate thread (`watcher.rs`) to never block the UI:
 
 Proper terminal setup/teardown in `TerminalGuard`:
 
-1. Setup: raw mode → alternate screen → mouse capture
-2. Teardown: disable mouse → **drain pending input** → leave screen → disable raw mode
+1. Setup: raw mode → alternate screen → mouse capture → kitty keyboard enhancement
+2. Teardown: pop keyboard enhancement → disable mouse → **drain pending input** → leave screen → disable raw mode
 
 The drain step is critical - it consumes any mouse events still in the buffer to prevent escape sequence garbage on exit.
 
@@ -71,10 +70,15 @@ Supported terminals: ghostty, kitty, WezTerm, Alacritty, iTerm2, foot, rio.
 
 - `j/k` or arrows: navigate files
 - `h/l`: collapse/expand directories
+- `Space`/`Enter`: toggle expand/collapse directories
+- `Enter` on file: open in editor
 - `J/K`: scroll diff
-- `Enter`: open in editor
 - Mouse: click files, scroll diff panel
 - `q`/`Ctrl+C`: quit
+
+## Editor
+
+Opens files with `PRDIFF_EDITOR`, falling back to `EDITOR`, then `zed` as default.
 
 ## Debugging
 
