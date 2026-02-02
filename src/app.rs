@@ -1,6 +1,7 @@
 use crate::git;
 use crate::highlight::Highlighter;
 use crate::model::{DiffSource, FileEntry, HighlightedLine, TreeNode};
+use crate::theme::Theme;
 use crate::tree;
 use crate::watcher::{GitWatcher, WatcherMessage};
 use anyhow::Result;
@@ -25,10 +26,11 @@ pub struct App {
     highlighter: Highlighter,
     tree_version: u64,
     watcher: GitWatcher,
+    pub theme: Theme,
 }
 
 impl App {
-    pub fn new(base_branch: Option<String>) -> Result<Self> {
+    pub fn new(base_branch: Option<String>, theme: Theme) -> Result<Self> {
         let base = git::detect_base_branch(base_branch)?;
         let merge_base = git::get_merge_base(&base)?;
         let files = git::get_changed_files(&merge_base)?;
@@ -57,9 +59,10 @@ impl App {
             merge_base,
             base_branch: base,
             editor,
-            highlighter: Highlighter::new(),
+            highlighter: Highlighter::new(theme),
             tree_version: 1,
             watcher,
+            theme,
         })
     }
 

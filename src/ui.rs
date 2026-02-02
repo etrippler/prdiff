@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::logging;
 use crate::model::{DiffSource, FileEntry, HighlightedLine, TreeNode};
+use crate::theme::Theme;
 use anyhow::Result;
 use crossterm::{
     event::{
@@ -186,6 +187,7 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<(
                 .and_then(|p| app.get_diff_source(p))
                 .unwrap_or(DiffSource::Worktree);
             let selected_file_path_ref = selected_file_path.as_deref();
+            let theme = &app.theme;
 
             terminal.draw(|f| {
                 let layout = compute_layout(f.area());
@@ -202,6 +204,7 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<(
                     selected_file_path_ref,
                     selected_diff_source,
                     highlighted_lines,
+                    theme,
                 );
             })?;
 
@@ -360,6 +363,7 @@ fn draw_ui(
     selected_file_path: Option<&str>,
     selected_diff_source: DiffSource,
     highlighted_lines: &[HighlightedLine],
+    theme: &Theme,
 ) {
     // File tree
     let tree_block = Block::default()
@@ -411,8 +415,8 @@ fn draw_ui(
 
         let line_style = if is_selected {
             Style::default()
-                .bg(Color::Rgb(60, 60, 120))
-                .fg(Color::White)
+                .bg(theme.selected_bg)
+                .fg(theme.selected_fg)
                 .bold()
         } else {
             style

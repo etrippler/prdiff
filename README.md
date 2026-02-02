@@ -22,7 +22,15 @@ ln -s $(pwd)/target/release/prdiff ~/.local/bin/prdiff
 prdiff              # auto-detects develop/main/master as base
 prdiff main         # explicit base branch
 prdiff -b feature   # flag form
+prdiff -t light     # use light theme
 ```
+
+## Configuration
+
+| Variable | Description |
+|----------|-------------|
+| `PRDIFF_THEME` | Color theme: `dark` (default) or `light` |
+| `PRDIFF_EDITOR` | Editor for opening files (falls back to `EDITOR`, then `zed`) |
 
 ## Controls
 

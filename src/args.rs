@@ -1,5 +1,11 @@
+use crate::theme::ThemeMode;
 use anyhow::Result;
 use std::env;
+
+pub struct Args {
+    pub base_branch: Option<String>,
+    pub theme: Option<ThemeMode>,
+}
 
 fn print_usage() {
     eprintln!("prdiff - Terminal PR diff viewer");
@@ -7,15 +13,20 @@ fn print_usage() {
     eprintln!("Usage: prdiff [OPTIONS] [BASE_BRANCH]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -b, --base <BRANCH>  Base branch to diff against");
-    eprintln!("  -h, --help           Show this help message");
+    eprintln!("  -b, --base <BRANCH>    Base branch to diff against");
+    eprintln!("  -t, --theme <THEME>    Color theme: light or dark (default: dark)");
+    eprintln!("  -h, --help             Show this help message");
+    eprintln!();
+    eprintln!("Environment:");
+    eprintln!("  PRDIFF_THEME           Color theme (overrides --theme flag)");
     eprintln!();
     eprintln!("If no base branch specified, auto-detects upstream/develop/main/master");
 }
 
-pub fn parse_args() -> Result<Option<String>> {
+pub fn parse_args() -> Result<Args> {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut base_branch = None;
+    let mut theme = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -31,6 +42,16 @@ pub fn parse_args() -> Result<Option<String>> {
                 }
                 base_branch = Some(args[i].clone());
             }
+            "-t" | "--theme" => {
+                i += 1;
+                if i >= args.len() {
+                    anyhow::bail!("--theme requires a value: light or dark");
+                }
+                match ThemeMode::from_str(&args[i]) {
+                    Some(mode) => theme = Some(mode),
+                    None => anyhow::bail!("Invalid theme '{}': must be 'light' or 'dark'", args[i]),
+                }
+            }
             arg if arg.starts_with('-') => {
                 anyhow::bail!("Unknown option: {arg}");
             }
@@ -45,5 +66,5 @@ pub fn parse_args() -> Result<Option<String>> {
         i += 1;
     }
 
-    Ok(base_branch)
+    Ok(Args { base_branch, theme })
 }

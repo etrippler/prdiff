@@ -4,6 +4,7 @@ mod git;
 mod highlight;
 mod logging;
 mod model;
+mod theme;
 mod tree;
 mod ui;
 mod watcher;
@@ -20,8 +21,9 @@ pub fn run() -> Result<()> {
     logging::init_logging();
     logging::init_tracing();
 
-    let base_branch = args::parse_args()?;
-    let mut app = app::App::new(base_branch)?;
+    let args = args::parse_args()?;
+    let theme = theme::Theme::from_config(args.theme);
+    let mut app = app::App::new(args.base_branch, theme)?;
 
     let mut guard = ui::TerminalGuard::new()?;
     let mut terminal = ui::new_terminal()?;

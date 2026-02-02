@@ -1,8 +1,9 @@
 use crate::model::HighlightedLine;
+use crate::theme::Theme;
 use ratatui::prelude::Color;
 use syntect::{
     easy::HighlightLines,
-    highlighting::{Style as SyntectStyle, Theme, ThemeSet},
+    highlighting::{Style as SyntectStyle, Theme as SyntectTheme, ThemeSet},
     parsing::SyntaxSet,
 };
 
@@ -17,23 +18,30 @@ enum DiffLineType {
 
 pub struct Highlighter {
     syntax_set: SyntaxSet,
-    theme: Option<Theme>,
+    syntect_theme: Option<SyntectTheme>,
+    theme: Theme,
 }
 
 impl Highlighter {
-    pub fn new() -> Self {
+    pub fn new(theme: Theme) -> Self {
         let syntax_set = SyntaxSet::load_defaults_newlines();
         let theme_set = ThemeSet::load_defaults();
 
         // Keep this robust: missing themes should never crash the TUI.
-        let theme = theme_set
+        // Try the theme specified by our Theme, then fall back to alternatives.
+        let syntect_theme = theme_set
             .themes
-            .get("base16-ocean.light")
+            .get(theme.syntect_theme())
+            .or_else(|| theme_set.themes.get("base16-ocean.light"))
             .or_else(|| theme_set.themes.get("base16-ocean.dark"))
             .or_else(|| theme_set.themes.values().next())
             .cloned();
 
-        Self { syntax_set, theme }
+        Self {
+            syntax_set,
+            syntect_theme,
+            theme,
+        }
     }
 
     pub fn highlight_diff(&self, diff_lines: &[String], file_path: &str) -> Vec<HighlightedLine> {
@@ -51,7 +59,7 @@ impl Highlighter {
             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
 
         let mut highlighter = self
-            .theme
+            .syntect_theme
             .as_ref()
             .map(|theme| HighlightLines::new(syntax, theme));
 
@@ -63,14 +71,14 @@ impl Highlighter {
 
             let (bg_color, code_to_highlight) = match line_type {
                 DiffLineType::Added => (
-                    Color::Rgb(200, 255, 200),
+                    self.theme.diff_added_bg,
                     stripped.get(1..).unwrap_or("").to_string(),
                 ),
                 DiffLineType::Removed => (
-                    Color::Rgb(255, 220, 220),
+                    self.theme.diff_removed_bg,
                     stripped.get(1..).unwrap_or("").to_string(),
                 ),
-                DiffLineType::Hunk => (Color::Rgb(220, 220, 255), stripped.clone()),
+                DiffLineType::Hunk => (self.theme.diff_hunk_bg, stripped.clone()),
                 DiffLineType::Header => (Color::Reset, stripped.clone()),
                 DiffLineType::Context => {
                     if stripped.starts_with(' ') {
@@ -103,10 +111,10 @@ impl Highlighter {
 
             let mut spans = Vec::new();
 
-            // Add the prefix with appropriate color
+            // Add the prefix with appropriate color from theme
             let prefix_fg = match line_type {
-                DiffLineType::Added => Color::Green,
-                DiffLineType::Removed => Color::Red,
+                DiffLineType::Added => self.theme.diff_added_fg,
+                DiffLineType::Removed => self.theme.diff_removed_fg,
                 _ => Color::DarkGray,
             };
             if !prefix.is_empty() {
