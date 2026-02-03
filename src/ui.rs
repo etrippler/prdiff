@@ -14,7 +14,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 use std::io::{stdout, Write, Stdout};
 use std::time::Duration;
@@ -452,22 +452,13 @@ fn draw_ui(
 
     if selected_file_path.is_some() {
         let max_diff_visible = diff_inner.height as usize;
-        let diff_width = diff_inner.width as usize;
         let clamped_scroll =
             diff_scroll.min(highlighted_lines.len().saturating_sub(max_diff_visible));
 
         let diff_text: Vec<Line> = highlighted_lines
             .iter()
-            .skip(clamped_scroll)
-            .take(max_diff_visible)
             .map(|hl| {
-                let line_bg = hl
-                    .spans
-                    .first()
-                    .map(|(_, _, bg)| *bg)
-                    .unwrap_or(Color::Reset);
-
-                let mut spans: Vec<Span> = hl
+                let spans: Vec<Span> = hl
                     .spans
                     .iter()
                     .map(|(text, fg, bg)| {
@@ -475,17 +466,16 @@ fn draw_ui(
                     })
                     .collect();
 
-                let current_len: usize = hl.spans.iter().map(|(t, _, _)| t.chars().count()).sum();
-                if current_len < diff_width {
-                    let padding = " ".repeat(diff_width - current_len);
-                    spans.push(Span::styled(padding, Style::default().bg(line_bg)));
-                }
-
                 Line::from(spans)
             })
             .collect();
 
-        f.render_widget(Paragraph::new(diff_text), diff_inner);
+        f.render_widget(
+            Paragraph::new(diff_text)
+                .wrap(Wrap { trim: false })
+                .scroll((clamped_scroll as u16, 0)),
+            diff_inner,
+        );
 
         if highlighted_lines.len() > max_diff_visible {
             let mut scrollbar_state =
