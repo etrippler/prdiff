@@ -32,9 +32,12 @@ struct UiLayout {
     help_area: Rect,
 }
 
-fn compute_layout(area: Rect) -> UiLayout {
+fn compute_layout(area: Rect, split_percent: u16) -> UiLayout {
+    let tree_pct = split_percent.clamp(10, 90);
+    let diff_pct = 100 - tree_pct;
     let chunks =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area);
+        Layout::horizontal([Constraint::Percentage(tree_pct), Constraint::Percentage(diff_pct)])
+            .split(area);
     let tree_area = chunks[0];
     let diff_area = chunks[1];
 
@@ -93,7 +96,8 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<(
 
                     // Get layout for key handling
                     let term_size = terminal.size()?;
-                    let layout = compute_layout(Rect::new(0, 0, term_size.width, term_size.height));
+                    let layout =
+                        compute_layout(Rect::new(0, 0, term_size.width, term_size.height), app.split_percent);
 
                     if handle_key(app, key.code, &layout, &cached_visible) {
                         return Ok(());
@@ -102,7 +106,8 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<(
                 }
                 Event::Mouse(mouse) => {
                     let term_size = terminal.size()?;
-                    let layout = compute_layout(Rect::new(0, 0, term_size.width, term_size.height));
+                    let layout =
+                        compute_layout(Rect::new(0, 0, term_size.width, term_size.height), app.split_percent);
                     handle_mouse(app, &layout, &mouse, cached_visible.len());
                     needs_redraw = true;
                 }
@@ -167,7 +172,7 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<(
 
             let term_size = terminal.size()?;
             let term_rect = Rect::new(0, 0, term_size.width, term_size.height);
-            let layout = compute_layout(term_rect);
+            let layout = compute_layout(term_rect, app.split_percent);
 
             clamp_scroll(app, &layout);
 
@@ -188,9 +193,10 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<(
                 .unwrap_or(DiffSource::Worktree);
             let selected_file_path_ref = selected_file_path.as_deref();
             let theme = &app.theme;
+            let split_percent = app.split_percent;
 
             terminal.draw(|f| {
-                let layout = compute_layout(f.area());
+                let layout = compute_layout(f.area(), split_percent);
                 draw_ui(
                     f,
                     &layout,
@@ -299,6 +305,12 @@ fn handle_key(
             if matches!(visible.get(app.cursor), Some((_, _, true, _))) {
                 app.toggle_expand();
             }
+        }
+        KeyCode::Char('<') => {
+            app.split_percent = app.split_percent.saturating_sub(5).max(10);
+        }
+        KeyCode::Char('>') => {
+            app.split_percent = (app.split_percent + 5).min(90);
         }
         _ => {}
     }
@@ -494,7 +506,7 @@ fn draw_ui(
     // Help footer (skip if terminal is too small).
     if f.area().height > 0 {
         let help =
-            " j/k:nav | h/l/Space:collapse/expand | Enter:open | J/K:scroll diff | q:quit ";
+            " j/k:nav | h/l/Space:expand | Enter:open | J/K:scroll | </>:resize | q:quit ";
         f.render_widget(
             Paragraph::new(help).style(Style::default().bg(Color::DarkGray)),
             layout.help_area,

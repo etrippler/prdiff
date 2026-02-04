@@ -73,6 +73,7 @@ Supported terminals: ghostty, kitty, WezTerm, Alacritty, iTerm2, foot, rio.
 - `Space`/`Enter`: toggle expand/collapse directories
 - `Enter` on file: open in editor
 - `J/K`: scroll diff
+- `<`/`>`: resize panel split (shrink/grow file tree)
 - Mouse: click files, scroll diff panel
 - `q`/`Ctrl+C`: quit
 

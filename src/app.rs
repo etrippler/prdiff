@@ -27,6 +27,8 @@ pub struct App {
     tree_version: u64,
     watcher: GitWatcher,
     pub theme: Theme,
+    /// Percentage of terminal width for the file tree panel (10-90)
+    pub split_percent: u16,
 }
 
 impl App {
@@ -63,6 +65,7 @@ impl App {
             tree_version: 1,
             watcher,
             theme,
+            split_percent: 30,
         })
     }
 
