@@ -230,15 +230,8 @@ fn git_default_remote() -> Option<String> {
 }
 
 fn resolve_base_ref(specified: &str) -> Result<String> {
-    if Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", specified])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        return Ok(specified.to_string());
-    }
-
+    // Prefer remote tracking ref (e.g. origin/develop) over local branch.
+    // PR diffs compare against the remote, and local branches are often stale.
     if !specified.contains('/') {
         if let Some(remote) = git_default_remote() {
             let candidate = format!("{remote}/{specified}");
@@ -251,6 +244,15 @@ fn resolve_base_ref(specified: &str) -> Result<String> {
                 return Ok(candidate);
             }
         }
+    }
+
+    if Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", specified])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return Ok(specified.to_string());
     }
 
     anyhow::bail!("Could not resolve base branch '{specified}'")
