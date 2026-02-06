@@ -8,6 +8,53 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::env;
 
+pub struct BranchModal {
+    pub branches: Vec<String>,
+    pub filtered: Vec<usize>,
+    pub query: String,
+    pub cursor: usize,
+    pub scroll_offset: usize,
+}
+
+impl BranchModal {
+    pub fn new(branches: Vec<String>) -> Self {
+        let filtered: Vec<usize> = (0..branches.len()).collect();
+        Self {
+            branches,
+            filtered,
+            query: String::new(),
+            cursor: 0,
+            scroll_offset: 0,
+        }
+    }
+
+    pub fn update_filter(&mut self) {
+        let query_lower = self.query.to_lowercase();
+        self.filtered = self
+            .branches
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| {
+                query_lower.is_empty() || b.to_lowercase().contains(&query_lower)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        // Reset cursor to stay in bounds
+        if self.filtered.is_empty() {
+            self.cursor = 0;
+        } else if self.cursor >= self.filtered.len() {
+            self.cursor = self.filtered.len() - 1;
+        }
+        self.scroll_offset = 0;
+    }
+
+    pub fn selected_branch(&self) -> Option<&str> {
+        self.filtered
+            .get(self.cursor)
+            .map(|&i| self.branches[i].as_str())
+    }
+}
+
 pub struct App {
     pub files: Vec<FileEntry>,
     pub tree: Vec<TreeNode>,
@@ -28,6 +75,7 @@ pub struct App {
     pub theme: Theme,
     /// Percentage of terminal width for the file tree panel (10-90)
     pub split_percent: u16,
+    pub branch_modal: Option<BranchModal>,
 }
 
 impl App {
@@ -65,6 +113,7 @@ impl App {
             watcher,
             theme,
             split_percent: 30,
+            branch_modal: None,
         })
     }
 
@@ -241,5 +290,54 @@ impl App {
             Some((_, _, TreeNode::File(f))) => Some((self.editor.clone(), f.path.clone())),
             _ => None,
         }
+    }
+
+    pub fn open_branch_modal(&mut self) {
+        let branches = git::list_branches().unwrap_or_default();
+        if !branches.is_empty() {
+            self.branch_modal = Some(BranchModal::new(branches));
+        }
+    }
+
+    pub fn switch_base_branch(&mut self, branch: &str) {
+        let resolved = match git::resolve_base_ref(branch) {
+            Ok(r) => r,
+            Err(_) => branch.to_string(),
+        };
+        let merge_base = match git::get_merge_base(&resolved) {
+            Ok(mb) => mb,
+            Err(_) => return,
+        };
+        let files = match git::get_changed_files(&merge_base) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+
+        self.base_branch = resolved;
+        self.merge_base = merge_base.clone();
+        self.diff_cache.clear();
+        self.diff_source_cache.clear();
+        self.highlighted_cache.clear();
+        self.tree = tree::build_tree(&files);
+        self.tree_version = self.tree_version.wrapping_add(1);
+
+        let mut new_expanded = HashSet::new();
+        tree::expand_all_dirs(&self.tree, "", &mut new_expanded);
+        self.expanded = new_expanded;
+
+        self.files = files.clone();
+        self.cursor = 0;
+        self.scroll_offset = 0;
+        self.diff_scroll = 0;
+
+        self.respawn_watcher();
+    }
+
+    fn respawn_watcher(&mut self) {
+        self.watcher = GitWatcher::spawn(
+            self.base_branch.clone(),
+            self.merge_base.clone(),
+            self.files.clone(),
+        );
     }
 }

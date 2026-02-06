@@ -229,7 +229,7 @@ fn git_default_remote() -> Option<String> {
     None
 }
 
-fn resolve_base_ref(specified: &str) -> Result<String> {
+pub fn resolve_base_ref(specified: &str) -> Result<String> {
     // Prefer remote tracking ref (e.g. origin/develop) over local branch.
     // PR diffs compare against the remote, and local branches are often stale.
     if !specified.contains('/') {
@@ -237,8 +237,8 @@ fn resolve_base_ref(specified: &str) -> Result<String> {
             let candidate = format!("{remote}/{specified}");
             if Command::new("git")
                 .args(["rev-parse", "--verify", "--quiet", &candidate])
-                .status()
-                .map(|s| s.success())
+                .output()
+                .map(|o| o.status.success())
                 .unwrap_or(false)
             {
                 return Ok(candidate);
@@ -248,14 +248,32 @@ fn resolve_base_ref(specified: &str) -> Result<String> {
 
     if Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", specified])
-        .status()
-        .map(|s| s.success())
+        .output()
+        .map(|o| o.status.success())
         .unwrap_or(false)
     {
         return Ok(specified.to_string());
     }
 
     anyhow::bail!("Could not resolve base branch '{specified}'")
+}
+
+pub fn list_branches() -> Result<Vec<String>> {
+    let out = Command::new("git")
+        .args(["branch", "-a", "--format=%(refname:short)"])
+        .output()
+        .context("Failed to run git branch -a")?;
+    if !out.status.success() {
+        anyhow::bail!("git branch -a failed");
+    }
+    let mut seen = HashSet::new();
+    let mut branches: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && !s.contains("HEAD") && seen.insert(s.clone()))
+        .collect();
+    branches.sort();
+    Ok(branches)
 }
 
 fn normalize_numstat_path(field: &str) -> String {

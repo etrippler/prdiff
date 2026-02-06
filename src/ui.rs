@@ -14,7 +14,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use std::io::{stdout, Write, Stdout};
 use std::process::Command;
@@ -97,31 +97,38 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>, guard: &mut
                     // NOTE: Esc is NOT used as exit key because some terminals/escape sequences
                     // can be misinterpreted as Esc, causing unexpected exits. Use 'q' or Ctrl+C.
 
-                    // Get layout for key handling
-                    let term_size = terminal.size()?;
-                    let layout =
-                        compute_layout(Rect::new(0, 0, term_size.width, term_size.height), app.split_percent);
+                    if app.branch_modal.is_some() {
+                        handle_modal_key(app, key.code, key.modifiers);
+                        needs_redraw = true;
+                    } else {
+                        // Get layout for key handling
+                        let term_size = terminal.size()?;
+                        let layout =
+                            compute_layout(Rect::new(0, 0, term_size.width, term_size.height), app.split_percent);
 
-                    match handle_key(app, key.code, &layout, &cached_visible) {
-                        KeyAction::Quit => return Ok(()),
-                        KeyAction::OpenEditor => {
-                            if let Some((editor, path)) = app.editor_command() {
-                                guard.restore();
-                                let _ = Command::new(&editor).arg(&path).status();
-                                guard.enter()?;
-                                terminal.clear()?;
+                        match handle_key(app, key.code, &layout, &cached_visible) {
+                            KeyAction::Quit => return Ok(()),
+                            KeyAction::OpenEditor => {
+                                if let Some((editor, path)) = app.editor_command() {
+                                    guard.restore();
+                                    let _ = Command::new(&editor).arg(&path).status();
+                                    guard.enter()?;
+                                    terminal.clear()?;
+                                }
                             }
+                            KeyAction::Continue => {}
                         }
-                        KeyAction::Continue => {}
+                        needs_redraw = true;
                     }
-                    needs_redraw = true;
                 }
                 Event::Mouse(mouse) => {
-                    let term_size = terminal.size()?;
-                    let layout =
-                        compute_layout(Rect::new(0, 0, term_size.width, term_size.height), app.split_percent);
-                    handle_mouse(app, &layout, &mouse, cached_visible.len());
-                    needs_redraw = true;
+                    if app.branch_modal.is_none() {
+                        let term_size = terminal.size()?;
+                        let layout =
+                            compute_layout(Rect::new(0, 0, term_size.width, term_size.height), app.split_percent);
+                        handle_mouse(app, &layout, &mouse, cached_visible.len());
+                        needs_redraw = true;
+                    }
                 }
                 Event::Resize(_, _) => {
                     needs_redraw = true;
@@ -200,6 +207,8 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>, guard: &mut
             // Compute layout inside draw to use the authoritative frame area,
             // and clamp scroll values against that same layout.
             let mut draw_layout = None;
+            let branch_modal = &app.branch_modal;
+            let has_modal = branch_modal.is_some();
             terminal.draw(|f| {
                 let layout = compute_layout(f.area(), split_percent);
                 draw_layout = Some(layout);
@@ -217,7 +226,11 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>, guard: &mut
                     selected_diff_source,
                     highlighted_lines,
                     theme,
+                    has_modal,
                 );
+                if let Some(modal) = branch_modal {
+                    draw_branch_modal(f, modal, base_branch, theme);
+                }
             })?;
 
             if let Some(layout) = draw_layout {
@@ -327,9 +340,62 @@ fn handle_key(
         KeyCode::Char('>') => {
             app.split_percent = (app.split_percent + 5).min(90);
         }
+        KeyCode::Char('b') => {
+            app.open_branch_modal();
+        }
         _ => {}
     }
     KeyAction::Continue
+}
+
+fn handle_modal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    let Some(modal) = &mut app.branch_modal else {
+        return;
+    };
+
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+
+    match code {
+        KeyCode::Esc => {
+            app.branch_modal = None;
+        }
+        KeyCode::Enter => {
+            let selected = modal.selected_branch().map(|s| s.to_string());
+            app.branch_modal = None;
+            if let Some(branch) = selected {
+                app.switch_base_branch(&branch);
+            }
+        }
+        KeyCode::Up => {
+            if modal.cursor > 0 {
+                modal.cursor -= 1;
+            }
+        }
+        KeyCode::Down => {
+            if modal.cursor < modal.filtered.len().saturating_sub(1) {
+                modal.cursor += 1;
+            }
+        }
+        KeyCode::Char('k' | 'p') if ctrl => {
+            if modal.cursor > 0 {
+                modal.cursor -= 1;
+            }
+        }
+        KeyCode::Char('j' | 'n') if ctrl => {
+            if modal.cursor < modal.filtered.len().saturating_sub(1) {
+                modal.cursor += 1;
+            }
+        }
+        KeyCode::Backspace => {
+            modal.query.pop();
+            modal.update_filter();
+        }
+        KeyCode::Char(c) if !ctrl => {
+            modal.query.push(c);
+            modal.update_filter();
+        }
+        _ => {}
+    }
 }
 
 fn handle_mouse(app: &mut App, layout: &UiLayout, mouse: &MouseEvent, visible_count: usize) {
@@ -391,6 +457,7 @@ fn draw_ui(
     selected_diff_source: DiffSource,
     highlighted_lines: &[HighlightedLine],
     theme: &Theme,
+    has_modal: bool,
 ) {
     // File tree
     let tree_block = Block::default()
@@ -518,13 +585,101 @@ fn draw_ui(
 
     // Help footer (skip if terminal is too small).
     if f.area().height > 0 {
-        let help =
-            " j/k:nav | h/l/Space:expand | Enter:open | J/K:scroll | </>:resize | q:quit ";
+        let help = if has_modal {
+            " ↑/↓:nav | Enter:select | Esc:cancel | type to filter "
+        } else {
+            " j/k:nav | h/l/Space:expand | Enter:open | J/K:scroll | </>:resize | b:branch | q:quit "
+        };
         f.render_widget(
             Paragraph::new(help).style(Style::default().bg(Color::DarkGray)),
             layout.help_area,
         );
     }
+}
+
+fn draw_branch_modal(
+    f: &mut Frame,
+    modal: &crate::app::BranchModal,
+    current_base: &str,
+    theme: &Theme,
+) {
+    let area = f.area();
+    let width = 60.min(area.width.saturating_sub(4));
+    let height = (area.height * 60 / 100).max(5).min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title(" Switch base branch ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    if inner.height < 2 || inner.width < 4 {
+        return;
+    }
+
+    // Search input row
+    let search_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let search_text = format!(" > {}_", modal.query);
+    f.render_widget(
+        Paragraph::new(search_text).style(Style::default().fg(Color::Yellow)),
+        search_area,
+    );
+
+    // Branch list below the search
+    let list_height = inner.height.saturating_sub(1) as usize;
+    let list_area = Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(1));
+
+    // Adjust modal scroll_offset for the list
+    let scroll_offset = if modal.cursor >= modal.scroll_offset + list_height {
+        modal.cursor.saturating_add(1).saturating_sub(list_height)
+    } else if modal.cursor < modal.scroll_offset {
+        modal.cursor
+    } else {
+        modal.scroll_offset
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (vi, &branch_idx) in modal
+        .filtered
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(list_height)
+    {
+        let branch = &modal.branches[branch_idx];
+        let is_current = branch == current_base;
+        let prefix = if is_current { "* " } else { "  " };
+        let label = format!("{prefix}{branch}");
+        let is_selected = vi == modal.cursor;
+
+        let style = if is_selected {
+            Style::default()
+                .bg(theme.selected_bg)
+                .fg(theme.selected_fg)
+                .bold()
+        } else if is_current {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default()
+        };
+
+        lines.push(Line::styled(label, style));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::styled(
+            "  No matching branches",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    f.render_widget(Paragraph::new(lines), list_area);
 }
 
 pub struct TerminalGuard {
