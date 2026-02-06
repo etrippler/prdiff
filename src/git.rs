@@ -308,7 +308,10 @@ fn git_diff_status_and_stats(merge_base: &str, cached: bool) -> Result<Vec<FileE
         let part = parts[i];
         if part.starts_with(':') {
             // --raw format with -z: `:oldmode newmode oldhash newhash status\0path[\0path]`
-            let status_char = part.trim_end().chars().last().unwrap_or('?');
+            // Status token is the last space-separated field (e.g. "M", "R100", "C085").
+            // Extract the first character as the status letter.
+            let status_token = part.split_whitespace().last().unwrap_or("?");
+            let status_char = status_token.chars().next().unwrap_or('?');
             let status = match status_char {
                 'A' => FileStatus::Added,
                 'M' | 'T' => FileStatus::Modified,
@@ -340,19 +343,28 @@ fn git_diff_status_and_stats(merge_base: &str, cached: bool) -> Result<Vec<FileE
                 }
                 status_map.insert(path, status);
             }
-        } else if !part.is_empty() && part.as_bytes()[0].is_ascii_digit() {
+        } else if !part.is_empty() && (part.as_bytes()[0].is_ascii_digit() || part.starts_with('-')) {
             // numstat format with -z: `add\tdel\tpath` (tabs within the NUL-delimited field)
+            // For renames/copies with -z: `add\tdel\t\0old_path\0new_path` — the path field
+            // after the second tab is empty, and old/new paths follow as separate NUL parts.
+            // Binary files show as `-\t-\tpath`.
             let fields: Vec<&str> = part.split('\t').collect();
             if fields.len() >= 3 {
                 let add = fields[0].parse::<i32>().unwrap_or(0);
                 let del = fields[1].parse::<i32>().unwrap_or(0);
-                let raw_path = if fields.len() >= 4 {
-                    fields[fields.len() - 1]
+                let raw_path = fields[2];
+                if raw_path.is_empty() {
+                    // Rename/copy: consume old\0new from subsequent NUL-delimited parts
+                    i += 1; // skip old path
+                    i += 1; // move to new path
+                    let path = parts.get(i).unwrap_or(&"").to_string();
+                    if !path.is_empty() {
+                        stats_map.insert(path, (add, del));
+                    }
                 } else {
-                    fields[2]
-                };
-                let path = normalize_numstat_path(raw_path);
-                stats_map.insert(path, (add, del));
+                    let path = normalize_numstat_path(raw_path);
+                    stats_map.insert(path, (add, del));
+                }
             }
         }
         i += 1;

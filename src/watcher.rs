@@ -139,13 +139,12 @@ fn watcher_loop(
             }
         }
 
-        // Only run git status when file mtimes changed (detects new untracked files, staging)
-        if !invalidate_paths.is_empty() || git_dir_changed {
-            if let Ok(status_hash) = git::git_status_hash() {
-                if status_hash != last_status_hash {
-                    last_status_hash = status_hash;
-                    needs_refresh = true;
-                }
+        // Always check git status to detect new untracked files and staging changes.
+        // This is a single process spawn per poll cycle — cheap enough to run unconditionally.
+        if let Ok(status_hash) = git::git_status_hash() {
+            if status_hash != last_status_hash {
+                last_status_hash = status_hash;
+                needs_refresh = true;
             }
         }
 
