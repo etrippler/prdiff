@@ -7,7 +7,6 @@ use crate::watcher::{GitWatcher, WatcherMessage};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::process::Command;
 
 pub struct App {
     pub files: Vec<FileEntry>,
@@ -135,19 +134,20 @@ impl App {
         self.highlighted_cache.retain(|p, _| new_paths.contains(p));
 
         // Preserve cursor on the previously selected path if possible.
-        if let Some(selected) = old_selected {
-            if let Some((idx, _)) = self
+        let visible_count = self.visible_items().len();
+        if let Some(ref selected) = old_selected {
+            let new_idx = self
                 .visible_items()
                 .iter()
                 .enumerate()
-                .find(|(_, (_, path, _))| *path == selected)
-            {
+                .find(|(_, (_, path, _))| path == selected)
+                .map(|(idx, _)| idx);
+            if let Some(idx) = new_idx {
                 self.cursor = idx;
             }
         }
 
         // Clamp cursor
-        let visible_count = self.visible_items().len();
         if self.cursor >= visible_count && visible_count > 0 {
             self.cursor = visible_count - 1;
         }
@@ -168,28 +168,20 @@ impl App {
         items
     }
 
-    pub fn selected_file(&self) -> Option<&FileEntry> {
-        let visible = self.visible_items();
-        visible.get(self.cursor).and_then(|(_, _, node)| {
-            if let TreeNode::File(f) = node {
-                Some(f)
-            } else {
-                None
-            }
-        })
-    }
-
     pub fn selected_path(&self) -> Option<String> {
         let visible = self.visible_items();
         visible.get(self.cursor).map(|(_, path, _)| path.clone())
     }
 
     pub fn toggle_expand(&mut self) {
-        let Some(path) = self.selected_path() else {
-            return;
+        let dir_path = {
+            let visible = self.visible_items();
+            match visible.get(self.cursor) {
+                Some((_, path, TreeNode::Directory { .. })) => Some(path.clone()),
+                _ => None,
+            }
         };
-        let visible = self.visible_items();
-        if let Some((_, _, TreeNode::Directory { .. })) = visible.get(self.cursor) {
+        if let Some(path) = dir_path {
             if self.expanded.contains(&path) {
                 self.expanded.remove(&path);
             } else {
@@ -200,7 +192,11 @@ impl App {
     }
 
     pub fn collapse_selected(&mut self) {
-        if let Some(path) = self.selected_path() {
+        let path = {
+            let visible = self.visible_items();
+            visible.get(self.cursor).map(|(_, path, _)| path.clone())
+        };
+        if let Some(path) = path {
             if self.expanded.remove(&path) {
                 self.tree_version = self.tree_version.wrapping_add(1);
             }
@@ -237,9 +233,13 @@ impl App {
         self.diff_source_cache.get(path).copied()
     }
 
-    pub fn open_in_editor(&self) {
-        if let Some(file) = self.selected_file() {
-            let _ = Command::new(&self.editor).arg(&file.path).spawn();
+    /// Returns the (editor, path) to open, if a file is selected.
+    /// The caller is responsible for terminal restore/re-enter around spawning.
+    pub fn editor_command(&self) -> Option<(String, String)> {
+        let visible = self.visible_items();
+        match visible.get(self.cursor) {
+            Some((_, _, TreeNode::File(f))) => Some((self.editor.clone(), f.path.clone())),
+            _ => None,
         }
     }
 }

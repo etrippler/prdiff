@@ -53,7 +53,19 @@ fn watcher_loop(
     let mut last_base_oid = git::git_rev_parse(&base_branch).unwrap_or_default();
     let mut last_status_hash = git::git_status_hash().unwrap_or(0);
     let git_index_path = git::git_git_path("index").unwrap_or_default();
+    let git_head_path = git::git_git_path("HEAD").unwrap_or_default();
+    // Resolve the base branch ref path for cheap mtime checks.
+    // For remote refs like "origin/main", this resolves to e.g. ".git/refs/remotes/origin/main"
+    // or packed-refs. We also watch the packed-refs file for repacks.
+    let git_refs_heads_path = git::git_git_path(&format!("refs/heads/{base_branch}")).unwrap_or_default();
+    let git_refs_remotes_path = git::git_git_path(&format!("refs/remotes/{base_branch}")).unwrap_or_default();
+    let git_packed_refs_path = git::git_git_path("packed-refs").unwrap_or_default();
+
     let mut last_index_mtime = git::file_mtime_ns(&git_index_path);
+    let mut last_head_mtime = git::file_mtime_ns(&git_head_path);
+    let mut last_refs_heads_mtime = git::file_mtime_ns(&git_refs_heads_path);
+    let mut last_refs_remotes_mtime = git::file_mtime_ns(&git_refs_remotes_path);
+    let mut last_packed_refs_mtime = git::file_mtime_ns(&git_packed_refs_path);
     let mut file_mtimes = get_file_mtimes(&files);
 
     loop {
@@ -63,43 +75,60 @@ fn watcher_loop(
         let mut invalidate_paths: HashSet<String> = HashSet::new();
         let mut needs_refresh = false;
 
-        // Check HEAD and base branch
-        let head_oid = match git::git_rev_parse("HEAD") {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let base_oid = match git::git_rev_parse(&base_branch) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        if head_oid != last_head_oid || base_oid != last_base_oid {
-            invalidate_all_caches = true;
-            if let Ok(new_merge_base) = git::get_merge_base(&base_branch) {
-                merge_base = new_merge_base;
-                last_head_oid = head_oid;
-                last_base_oid = base_oid;
-                needs_refresh = true;
-            }
-        }
-
-        // Check index mtime
+        // Cheap mtime checks on git internal files to avoid spawning processes
         let index_mtime = git::file_mtime_ns(&git_index_path);
-        if index_mtime != last_index_mtime {
-            last_index_mtime = index_mtime;
-            invalidate_all_caches = true;
-            needs_refresh = true;
-        }
+        let head_mtime = git::file_mtime_ns(&git_head_path);
+        let refs_heads_mtime = git::file_mtime_ns(&git_refs_heads_path);
+        let refs_remotes_mtime = git::file_mtime_ns(&git_refs_remotes_path);
+        let packed_refs_mtime = git::file_mtime_ns(&git_packed_refs_path);
 
-        // Check git status hash
-        if let Ok(status_hash) = git::git_status_hash() {
-            if status_hash != last_status_hash {
-                last_status_hash = status_hash;
+        let git_dir_changed = index_mtime != last_index_mtime
+            || head_mtime != last_head_mtime
+            || refs_heads_mtime != last_refs_heads_mtime
+            || refs_remotes_mtime != last_refs_remotes_mtime
+            || packed_refs_mtime != last_packed_refs_mtime;
+
+        if git_dir_changed {
+            // Something in .git changed - check what exactly
+            if index_mtime != last_index_mtime {
+                last_index_mtime = index_mtime;
+                invalidate_all_caches = true;
                 needs_refresh = true;
+            }
+
+            if head_mtime != last_head_mtime
+                || refs_heads_mtime != last_refs_heads_mtime
+                || refs_remotes_mtime != last_refs_remotes_mtime
+                || packed_refs_mtime != last_packed_refs_mtime
+            {
+                last_head_mtime = head_mtime;
+                last_refs_heads_mtime = refs_heads_mtime;
+                last_refs_remotes_mtime = refs_remotes_mtime;
+                last_packed_refs_mtime = packed_refs_mtime;
+
+                // Only spawn git processes when ref files actually changed
+                let head_oid = match git::git_rev_parse("HEAD") {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let base_oid = match git::git_rev_parse(&base_branch) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                if head_oid != last_head_oid || base_oid != last_base_oid {
+                    invalidate_all_caches = true;
+                    if let Ok(new_merge_base) = git::get_merge_base(&base_branch) {
+                        merge_base = new_merge_base;
+                        last_head_oid = head_oid;
+                        last_base_oid = base_oid;
+                        needs_refresh = true;
+                    }
+                }
             }
         }
 
-        // Check file mtimes
+        // Check file mtimes (cheap stat calls, no git processes)
         let new_mtimes = get_file_mtimes(&files);
         for path in files.iter().map(|f| f.path.as_str()) {
             let old = file_mtimes.get(path).copied();
@@ -107,6 +136,16 @@ fn watcher_loop(
             if old != new {
                 invalidate_paths.insert(path.to_string());
                 needs_refresh = true;
+            }
+        }
+
+        // Only run git status when file mtimes changed (detects new untracked files, staging)
+        if !invalidate_paths.is_empty() || git_dir_changed {
+            if let Ok(status_hash) = git::git_status_hash() {
+                if status_hash != last_status_hash {
+                    last_status_hash = status_hash;
+                    needs_refresh = true;
+                }
             }
         }
 

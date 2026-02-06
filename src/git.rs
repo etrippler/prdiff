@@ -32,57 +32,59 @@ pub fn get_merge_base(base: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Check if file content appears to be binary by looking for NUL bytes in the first 8KB.
+fn is_binary(bytes: &[u8]) -> bool {
+    let check_len = bytes.len().min(8192);
+    bytes[..check_len].contains(&0)
+}
+
+fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} bytes")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
 pub fn get_changed_files(merge_base: &str) -> Result<Vec<FileEntry>> {
     // Effective PR diff is merge_base..(worktree) with a fallback to index-only changes
     // in the rare case the working tree no longer contains them.
-    let work_status = git_diff_name_status(merge_base, false)?;
-    let work_stats = git_diff_numstat(merge_base, false)?;
-    let index_status = git_diff_name_status(merge_base, true)?;
-    let index_stats = git_diff_numstat(merge_base, true)?;
+    let work_files = git_diff_status_and_stats(merge_base, false)?;
+    let index_files = git_diff_status_and_stats(merge_base, true)?;
 
     let mut files: Vec<FileEntry> = Vec::new();
     let mut seen_paths: HashSet<String> = HashSet::new();
 
-    for (path, status) in &work_status {
-        let (additions, deletions) = work_stats.get(path).copied().unwrap_or((0, 0));
-        seen_paths.insert(path.clone());
-        files.push(FileEntry {
-            path: path.clone(),
-            status: *status,
-            additions,
-            deletions,
-        });
+    for entry in &work_files {
+        seen_paths.insert(entry.path.clone());
+        files.push(entry.clone());
     }
 
     // Add index-only files that aren't represented in the working tree diff.
-    for (path, status) in &index_status {
-        if seen_paths.contains(path) {
+    for entry in &index_files {
+        if seen_paths.contains(&entry.path) {
             continue;
         }
-        let (additions, deletions) = index_stats.get(path).copied().unwrap_or((0, 0));
-        seen_paths.insert(path.clone());
-        files.push(FileEntry {
-            path: path.clone(),
-            status: *status,
-            additions,
-            deletions,
-        });
+        seen_paths.insert(entry.path.clone());
+        files.push(entry.clone());
     }
 
-    // Include untracked files
+    // Include untracked files (use -z for NUL-delimited output)
     let untracked_out = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
+        .args(["ls-files", "-z", "--others", "--exclude-standard"])
         .output()?;
-    for line in String::from_utf8_lossy(&untracked_out.stdout).lines() {
-        let path = line.trim().to_string();
+    for part in String::from_utf8_lossy(&untracked_out.stdout).split('\0') {
+        let path = part.to_string();
         if path.is_empty() || seen_paths.contains(&path) {
             continue;
         }
 
-        // Count lines for untracked files
+        // Count lines for untracked files (skip binary)
         let line_count = std::fs::read(&path)
             .map(|bytes| {
-                if bytes.is_empty() {
+                if bytes.is_empty() || is_binary(&bytes) {
                     return 0;
                 }
                 let newlines = bytes.iter().filter(|b| **b == b'\n').count() as i32;
@@ -146,6 +148,8 @@ pub fn get_file_diff(merge_base: &str, path: &str) -> (DiffSource, Vec<String>) 
         ];
         if bytes.is_empty() {
             result.push("@@ -0,0 +0,0 @@".to_string());
+        } else if is_binary(&bytes) {
+            result.push(format!("Binary file {path} ({})", format_size(bytes.len())));
         } else {
             let content = String::from_utf8_lossy(&bytes);
             let file_lines: Vec<&str> = content.lines().collect();
@@ -273,8 +277,12 @@ fn normalize_numstat_path(field: &str) -> String {
     field.to_string()
 }
 
-fn git_diff_name_status(merge_base: &str, cached: bool) -> Result<Vec<(String, FileStatus)>> {
-    let mut args = vec!["diff", "--name-status"];
+/// Run a single `git diff -z --raw --numstat` to get both status codes and line counts.
+/// With -z, fields are NUL-delimited for safe handling of paths with special characters.
+/// --raw gives `:oldmode newmode oldhash newhash status\0path[\0path]` records.
+/// --numstat gives `add\tdel\tpath\0` records (tabs within, NUL between).
+fn git_diff_status_and_stats(merge_base: &str, cached: bool) -> Result<Vec<FileEntry>> {
+    let mut args = vec!["diff", "-z", "--raw", "--numstat"];
     if cached {
         args.push("--cached");
     }
@@ -283,66 +291,85 @@ fn git_diff_name_status(merge_base: &str, cached: bool) -> Result<Vec<(String, F
     let out = Command::new("git")
         .args(args)
         .output()
-        .context("Failed to run git diff --name-status")?;
+        .context("Failed to run git diff -z --raw --numstat")?;
     if !out.status.success() {
-        anyhow::bail!("git diff --name-status failed");
+        anyhow::bail!("git diff -z --raw --numstat failed");
+    }
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let parts: Vec<&str> = text.split('\0').collect();
+
+    let mut status_map: HashMap<String, FileStatus> = HashMap::new();
+    let mut stats_map: HashMap<String, (i32, i32)> = HashMap::new();
+    let mut paths_ordered: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < parts.len() {
+        let part = parts[i];
+        if part.starts_with(':') {
+            // --raw format with -z: `:oldmode newmode oldhash newhash status\0path[\0path]`
+            let status_char = part.trim_end().chars().last().unwrap_or('?');
+            let status = match status_char {
+                'A' => FileStatus::Added,
+                'M' | 'T' => FileStatus::Modified,
+                'D' => FileStatus::Deleted,
+                'R' | 'C' => {
+                    // Renames/copies have two paths: old\0new
+                    // Skip old path, use new path
+                    i += 1; // skip old path
+                    if i < parts.len() {
+                        i += 1; // move to new path
+                    }
+                    let path = parts.get(i).unwrap_or(&"").to_string();
+                    if !path.is_empty() && !status_map.contains_key(&path) {
+                        paths_ordered.push(path.clone());
+                    }
+                    let s = if status_char == 'R' { FileStatus::Renamed } else { FileStatus::Added };
+                    status_map.insert(path, s);
+                    i += 1;
+                    continue;
+                }
+                _ => FileStatus::Unknown,
+            };
+
+            i += 1;
+            let path = parts.get(i).unwrap_or(&"").to_string();
+            if !path.is_empty() {
+                if !status_map.contains_key(&path) {
+                    paths_ordered.push(path.clone());
+                }
+                status_map.insert(path, status);
+            }
+        } else if !part.is_empty() && part.as_bytes()[0].is_ascii_digit() {
+            // numstat format with -z: `add\tdel\tpath` (tabs within the NUL-delimited field)
+            let fields: Vec<&str> = part.split('\t').collect();
+            if fields.len() >= 3 {
+                let add = fields[0].parse::<i32>().unwrap_or(0);
+                let del = fields[1].parse::<i32>().unwrap_or(0);
+                let raw_path = if fields.len() >= 4 {
+                    fields[fields.len() - 1]
+                } else {
+                    fields[2]
+                };
+                let path = normalize_numstat_path(raw_path);
+                stats_map.insert(path, (add, del));
+            }
+        }
+        i += 1;
     }
 
     let mut entries = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let status_code = parts[0].chars().next().unwrap_or('?');
-        let status = match status_code {
-            'A' => FileStatus::Added,
-            'M' | 'T' => FileStatus::Modified,
-            'D' => FileStatus::Deleted,
-            'R' => FileStatus::Renamed,
-            'C' => FileStatus::Added,
-            _ => FileStatus::Unknown,
-        };
-        let Some(path) = parts.last() else { continue };
-        entries.push((path.to_string(), status));
+    for path in &paths_ordered {
+        let status = status_map.get(path).copied().unwrap_or(FileStatus::Unknown);
+        let (additions, deletions) = stats_map.get(path).copied().unwrap_or((0, 0));
+        entries.push(FileEntry {
+            path: path.clone(),
+            status,
+            additions,
+            deletions,
+        });
     }
     Ok(entries)
-}
-
-fn git_diff_numstat(merge_base: &str, cached: bool) -> Result<HashMap<String, (i32, i32)>> {
-    let mut args = vec!["diff", "--numstat"];
-    if cached {
-        args.push("--cached");
-    }
-    args.push(merge_base);
-
-    let out = Command::new("git")
-        .args(args)
-        .output()
-        .context("Failed to run git diff --numstat")?;
-    if !out.status.success() {
-        anyhow::bail!("git diff --numstat failed");
-    }
-
-    let mut stats: HashMap<String, (i32, i32)> = HashMap::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        let add = parts[0].parse::<i32>().unwrap_or(0);
-        let del = parts[1].parse::<i32>().unwrap_or(0);
-
-        // If numstat includes both old and new paths (tab-separated), use the new path.
-        let raw_path = if parts.len() >= 4 {
-            parts[parts.len() - 1]
-        } else {
-            parts[2]
-        };
-        let path = normalize_numstat_path(raw_path);
-        stats.insert(path, (add, del));
-    }
-    Ok(stats)
 }
 
 #[cfg(test)]

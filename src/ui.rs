@@ -14,9 +14,10 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use std::io::{stdout, Write, Stdout};
+use std::process::Command;
 use std::time::Duration;
 
 pub fn new_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -33,11 +34,16 @@ struct UiLayout {
 }
 
 fn compute_layout(area: Rect, split_percent: u16) -> UiLayout {
+    // Reserve the bottom row for the help footer before splitting panels
+    let main_height = area.height.saturating_sub(1);
+    let main_area = Rect::new(area.x, area.y, area.width, main_height);
+    let help_area = Rect::new(area.x, area.y.saturating_add(main_height), area.width, 1);
+
     let tree_pct = split_percent.clamp(10, 90);
     let diff_pct = 100 - tree_pct;
     let chunks =
         Layout::horizontal([Constraint::Percentage(tree_pct), Constraint::Percentage(diff_pct)])
-            .split(area);
+            .split(main_area);
     let tree_area = chunks[0];
     let diff_area = chunks[1];
 
@@ -54,9 +60,6 @@ fn compute_layout(area: Rect, split_percent: u16) -> UiLayout {
         diff_area.height.saturating_sub(2),
     );
 
-    let help_y = area.y.saturating_add(area.height.saturating_sub(1));
-    let help_area = Rect::new(area.x, help_y, area.width, 1);
-
     UiLayout {
         tree_area,
         diff_area,
@@ -66,7 +69,7 @@ fn compute_layout(area: Rect, split_percent: u16) -> UiLayout {
     }
 }
 
-pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<()> {
+pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>, guard: &mut TerminalGuard) -> Result<()> {
     let mut needs_redraw = true;
 
     // Cache for visible items - only rebuild when tree changes
@@ -99,8 +102,17 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<(
                     let layout =
                         compute_layout(Rect::new(0, 0, term_size.width, term_size.height), app.split_percent);
 
-                    if handle_key(app, key.code, &layout, &cached_visible) {
-                        return Ok(());
+                    match handle_key(app, key.code, &layout, &cached_visible) {
+                        KeyAction::Quit => return Ok(()),
+                        KeyAction::OpenEditor => {
+                            if let Some((editor, path)) = app.editor_command() {
+                                guard.restore();
+                                let _ = Command::new(&editor).arg(&path).status();
+                                guard.enter()?;
+                                terminal.clear()?;
+                            }
+                        }
+                        KeyAction::Continue => {}
                     }
                     needs_redraw = true;
                 }
@@ -170,19 +182,6 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<(
                 app.diff_line_count = 0;
             }
 
-            let term_size = terminal.size()?;
-            let term_rect = Rect::new(0, 0, term_size.width, term_size.height);
-            let layout = compute_layout(term_rect, app.split_percent);
-
-            clamp_scroll(app, &layout);
-
-            let cursor = app.cursor;
-            let scroll_offset = app.scroll_offset;
-            let diff_scroll = app.diff_scroll;
-            let base_branch = app.base_branch.as_str();
-            let merge_base_short: String = app.merge_base.chars().take(7).collect();
-            let expanded = &app.expanded;
-
             let highlighted_lines: &[HighlightedLine] = selected_file_path
                 .as_ref()
                 .map(|p| app.get_highlighted(p))
@@ -194,16 +193,23 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<(
             let selected_file_path_ref = selected_file_path.as_deref();
             let theme = &app.theme;
             let split_percent = app.split_percent;
+            let base_branch = app.base_branch.as_str();
+            let merge_base_short: String = app.merge_base.chars().take(7).collect();
+            let expanded = &app.expanded;
 
+            // Compute layout inside draw to use the authoritative frame area,
+            // and clamp scroll values against that same layout.
+            let mut draw_layout = None;
             terminal.draw(|f| {
                 let layout = compute_layout(f.area(), split_percent);
+                draw_layout = Some(layout);
                 draw_ui(
                     f,
                     &layout,
                     &cached_visible,
-                    cursor,
-                    scroll_offset,
-                    diff_scroll,
+                    app.cursor,
+                    app.scroll_offset,
+                    app.diff_scroll,
                     expanded,
                     base_branch,
                     &merge_base_short,
@@ -214,7 +220,10 @@ pub fn run_app(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<(
                 );
             })?;
 
-            adjust_tree_scroll(app, &layout);
+            if let Some(layout) = draw_layout {
+                clamp_scroll(app, &layout);
+                adjust_tree_scroll(app, &layout);
+            }
             needs_redraw = false;
         }
 
@@ -256,15 +265,21 @@ fn adjust_tree_scroll(app: &mut App, layout: &UiLayout) {
     }
 }
 
+enum KeyAction {
+    Continue,
+    Quit,
+    OpenEditor,
+}
+
 fn handle_key(
     app: &mut App,
     code: KeyCode,
     layout: &UiLayout,
     visible: &[(usize, String, bool, Option<FileEntry>)],
-) -> bool {
+) -> KeyAction {
     let visible_count = visible.len();
     match code {
-        KeyCode::Char('q') => return true,
+        KeyCode::Char('q') => return KeyAction::Quit,
         KeyCode::Char('j') | KeyCode::Down => {
             if app.cursor < visible_count.saturating_sub(1) {
                 app.cursor += 1;
@@ -298,7 +313,7 @@ fn handle_key(
             if matches!(visible.get(app.cursor), Some((_, _, true, _))) {
                 app.toggle_expand();
             } else {
-                app.open_in_editor();
+                return KeyAction::OpenEditor;
             }
         }
         KeyCode::Char(' ') => {
@@ -314,7 +329,7 @@ fn handle_key(
         }
         _ => {}
     }
-    false
+    KeyAction::Continue
 }
 
 fn handle_mouse(app: &mut App, layout: &UiLayout, mouse: &MouseEvent, visible_count: usize) {
@@ -467,7 +482,10 @@ fn draw_ui(
         let clamped_scroll =
             diff_scroll.min(highlighted_lines.len().saturating_sub(max_diff_visible));
 
-        let diff_text: Vec<Line> = highlighted_lines
+        let visible_end = (clamped_scroll + max_diff_visible).min(highlighted_lines.len());
+        let visible_lines = &highlighted_lines[clamped_scroll..visible_end];
+
+        let diff_text: Vec<Line> = visible_lines
             .iter()
             .map(|hl| {
                 let spans: Vec<Span> = hl
@@ -482,12 +500,7 @@ fn draw_ui(
             })
             .collect();
 
-        f.render_widget(
-            Paragraph::new(diff_text)
-                .wrap(Wrap { trim: false })
-                .scroll((clamped_scroll as u16, 0)),
-            diff_inner,
-        );
+        f.render_widget(Paragraph::new(diff_text), diff_inner);
 
         if highlighted_lines.len() > max_diff_visible {
             let mut scrollbar_state =
@@ -557,6 +570,18 @@ impl TerminalGuard {
         let _ = self.stdout.flush();
         let _ = disable_raw_mode();
         self.restored = true;
+    }
+
+    /// Re-enter the TUI after a temporary restore (e.g., editor launch).
+    pub fn enter(&mut self) -> Result<()> {
+        enable_raw_mode()?;
+        self.stdout.execute(EnterAlternateScreen)?;
+        self.stdout.execute(EnableMouseCapture)?;
+        self.stdout.execute(PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ))?;
+        self.restored = false;
+        Ok(())
     }
 }
 

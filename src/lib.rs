@@ -29,7 +29,7 @@ pub fn run() -> Result<()> {
     let mut terminal = ui::new_terminal()?;
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ui::run_app(&mut app, &mut terminal)
+        ui::run_app(&mut app, &mut terminal, &mut guard)
     }));
 
     guard.restore();
