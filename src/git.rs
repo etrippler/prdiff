@@ -4,6 +4,15 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::process::Command;
 
+/// Create a git Command with GIT_OPTIONAL_LOCKS=0 to avoid creating index.lock.
+/// prdiff is read-only and should never lock the index, which would conflict
+/// with user git operations in the same repo.
+fn git_cmd() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    cmd
+}
+
 pub fn detect_base_branch(specified: Option<String>) -> Result<String> {
     if let Some(b) = specified {
         return resolve_base_ref(&b);
@@ -22,7 +31,7 @@ pub fn detect_base_branch(specified: Option<String>) -> Result<String> {
 }
 
 pub fn get_merge_base(base: &str) -> Result<String> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["merge-base", "HEAD", base])
         .output()
         .context("Failed to run git merge-base")?;
@@ -72,7 +81,7 @@ pub fn get_changed_files(merge_base: &str) -> Result<Vec<FileEntry>> {
     }
 
     // Include untracked files (use -z for NUL-delimited output)
-    let untracked_out = Command::new("git")
+    let untracked_out = git_cmd()
         .args(["ls-files", "-z", "--others", "--exclude-standard"])
         .output()?;
     for part in String::from_utf8_lossy(&untracked_out.stdout).split('\0') {
@@ -111,7 +120,7 @@ pub fn get_changed_files(merge_base: &str) -> Result<Vec<FileEntry>> {
 pub fn get_file_diff(merge_base: &str, path: &str) -> (DiffSource, Vec<String>) {
     // Diff merge_base against working tree (not HEAD) to include uncommitted changes.
     // Fall back to index-only diff if the working tree doesn't currently contain the change.
-    let worktree = Command::new("git")
+    let worktree = git_cmd()
         .args(["diff", merge_base, "--", path])
         .output();
 
@@ -125,7 +134,7 @@ pub fn get_file_diff(merge_base: &str, path: &str) -> (DiffSource, Vec<String>) 
         }
     }
 
-    let index = Command::new("git")
+    let index = git_cmd()
         .args(["diff", "--cached", merge_base, "--", path])
         .output();
     if let Ok(o) = index {
@@ -165,7 +174,7 @@ pub fn get_file_diff(merge_base: &str, path: &str) -> (DiffSource, Vec<String>) 
 }
 
 pub fn git_git_path(name: &str) -> Result<String> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["rev-parse", "--git-path", name])
         .output()
         .with_context(|| format!("Failed to run git rev-parse --git-path {name}"))?;
@@ -176,7 +185,7 @@ pub fn git_git_path(name: &str) -> Result<String> {
 }
 
 pub fn git_rev_parse(rev: &str) -> Result<String> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["rev-parse", rev])
         .output()
         .with_context(|| format!("Failed to run git rev-parse {rev}"))?;
@@ -187,7 +196,7 @@ pub fn git_rev_parse(rev: &str) -> Result<String> {
 }
 
 pub fn git_status_hash() -> Result<u64> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["status", "--porcelain=v1", "-z"])
         .output()
         .context("Failed to run git status")?;
@@ -211,7 +220,7 @@ pub fn file_mtime_ns(path: &str) -> Option<u128> {
 }
 
 fn git_default_remote() -> Option<String> {
-    let out = Command::new("git").args(["remote"]).output().ok()?;
+    let out = git_cmd().args(["remote"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -235,7 +244,7 @@ pub fn resolve_base_ref(specified: &str) -> Result<String> {
     if !specified.contains('/') {
         if let Some(remote) = git_default_remote() {
             let candidate = format!("{remote}/{specified}");
-            if Command::new("git")
+            if git_cmd()
                 .args(["rev-parse", "--verify", "--quiet", &candidate])
                 .output()
                 .map(|o| o.status.success())
@@ -246,7 +255,7 @@ pub fn resolve_base_ref(specified: &str) -> Result<String> {
         }
     }
 
-    if Command::new("git")
+    if git_cmd()
         .args(["rev-parse", "--verify", "--quiet", specified])
         .output()
         .map(|o| o.status.success())
@@ -259,7 +268,7 @@ pub fn resolve_base_ref(specified: &str) -> Result<String> {
 }
 
 pub fn list_branches() -> Result<Vec<String>> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["branch", "-a", "--format=%(refname:short)"])
         .output()
         .context("Failed to run git branch -a")?;
@@ -308,7 +317,7 @@ fn git_diff_status_and_stats(merge_base: &str, cached: bool) -> Result<Vec<FileE
     }
     args.push(merge_base);
 
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(args)
         .output()
         .context("Failed to run git diff -z --raw --numstat")?;
